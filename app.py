@@ -21,26 +21,29 @@ CORS(app)
 DB_PATH = 'boatrace_analysis.db'
 
 def init_database():
-    """データベースを初期化"""
+    """データベースを初期化（既存テーブルを削除して再作成）"""
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     cursor = conn.cursor()
     
-    # venuesテーブル作成
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS venues (
-            code TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            location TEXT NOT NULL,
-            region TEXT NOT NULL,
-            water_type TEXT NOT NULL
-        )
-    ''')
-    
-    # 会場データが存在するかチェック
-    cursor.execute('SELECT COUNT(*) FROM venues')
-    count = cursor.fetchone()[0]
-    
-    if count == 0:
+    try:
+        # 既存のvenuesテーブルを削除（スキーマエラー対策）
+        logger.info("既存のvenuesテーブルをチェック中...")
+        cursor.execute("DROP TABLE IF EXISTS venues")
+        logger.info("既存のvenuesテーブルを削除しました")
+        
+        # venuesテーブルを正しいスキーマで作成
+        cursor.execute('''
+            CREATE TABLE venues (
+                code TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                location TEXT NOT NULL,
+                region TEXT NOT NULL,
+                water_type TEXT NOT NULL
+            )
+        ''')
+        logger.info("venuesテーブルを新しいスキーマで作成しました")
+        
+        # 会場データを挿入
         logger.info("会場データを初期化しています...")
         venues_data = [
             ('01', '桐生', '群馬県みどり市', '関東', '淡水'),
@@ -72,8 +75,21 @@ def init_database():
         cursor.executemany('INSERT INTO venues VALUES (?, ?, ?, ?, ?)', venues_data)
         conn.commit()
         logger.info(f"{len(venues_data)}の会場データを挿入しました")
+        
+        # データベーススキーマの確認
+        cursor.execute("PRAGMA table_info(venues)")
+        columns = cursor.fetchall()
+        logger.info("venuesテーブルのスキーマ:")
+        for col in columns:
+            logger.info(f"  {col[1]} ({col[2]})")
+            
+    except Exception as e:
+        logger.error(f"データベース初期化エラー: {e}")
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
     
-    conn.close()
     logger.info("データベース初期化完了")
 
 def get_race_data(date, venue_code, race_number):
@@ -219,10 +235,11 @@ def home():
     """ホームページ"""
     return jsonify({
         'message': 'ボートレース予測API',
-        'version': '1.0',
+        'version': '1.1 - Schema Fixed',
         'endpoints': [
             '/api/venues - 全会場情報',
-            '/api/race/{date}/{venue_code}/{race_number} - レース予測'
+            '/api/race/{date}/{venue_code}/{race_number} - レース予測',
+            '/api/reset-db - データベース再構築（管理用）'
         ]
     })
 
@@ -232,6 +249,17 @@ def get_venues():
     try:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         cursor = conn.cursor()
+        
+        # スキーマエラー対策：カラム存在確認
+        cursor.execute("PRAGMA table_info(venues)")
+        columns = [col[1] for col in cursor.fetchall()]
+        
+        if 'location' not in columns:
+            logger.warning("locationカラムが存在しません。データベースを再初期化します。")
+            conn.close()
+            init_database()
+            conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+            cursor = conn.cursor()
         
         cursor.execute('SELECT code, name, location, region, water_type FROM venues ORDER BY CAST(code AS INTEGER)')
         venues = cursor.fetchall()
@@ -305,12 +333,30 @@ def get_race_prediction(date, venue_code, race_number):
             'error': str(e)
         }), 500
 
+@app.route('/api/reset-db')
+def reset_database():
+    """データベースを強制的に再構築（管理用）"""
+    try:
+        logger.info("データベース強制再構築を開始")
+        init_database()
+        return jsonify({
+            'success': True,
+            'message': 'データベースを再構築しました'
+        })
+    except Exception as e:
+        logger.error(f"データベース再構築エラー: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
+
 @app.route('/health')
 def health_check():
     """ヘルスチェック"""
     return jsonify({
         'status': 'healthy',
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now().isoformat(),
+        'version': '1.1 - Schema Fixed'
     })
 
 if __name__ == '__main__':
